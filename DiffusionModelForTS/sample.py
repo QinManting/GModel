@@ -14,7 +14,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from model.model_v1_nomlp import NoisePredictor
+from model.model_v1 import NoisePredictor
 
 from evaluate import Evaluator
 from utils import to_json_serializable
@@ -46,22 +46,18 @@ class Sampler:
     @torch.no_grad()
     def sample(self):
         B = self.arg_dict['num']
-        C = 4
+        C = 2
         L = 24
         T = self.arg_dict['T']
 
         # 初始化噪声
         xt = torch.randn(size=(B, C, L))
 
-        # 条件输入
-        season = torch.full((B,), self.arg_dict['season'], dtype=torch.long)
-        day_type = torch.full((B,), self.arg_dict['day_type'], dtype=torch.long)
-
         for t in tqdm(reversed(range(T)), desc='Sampling'):
             t_batch = torch.full((B,), t, dtype=torch.long)
 
             # 预测当前噪声
-            noise_pred = self.model(xt, t_batch, season, day_type)
+            noise_pred = self.model(xt, t_batch)
 
             # 估计 x0
             sqrt_alpha_cumprod_t = self.sqrt_alphas_cumprod[t]
@@ -91,95 +87,71 @@ class Sampler:
 
 def get_timeseries_by_condition(
     dataset,
-    season=None,
-    day_type=None,
     denorm=True,
 ):
     """
     从 MultiVarTimeSeriesDataset 中：
     - 按条件筛选
-    - 拼接 4 个变量
+    - 拼接 2 个变量
     - 可选反归一化
 
     return:
-        X: (N, 4, 24)
-        season: (N,)
-        day_type: (N,)
+        X: (N, 2, 24)
     """
-    X_list, season_list, day_list = [], [], []
+    X_list = []
 
     for i in range(len(dataset)):
-        s = dataset.season[i]
-        d = dataset.daytype[i]
-
-        if season is not None and s != season:
-            continue
-        if day_type is not None and d != day_type:
-            continue
-
-        X_pv, X_wind, X_load, X_TF, _, _ = dataset[i]
-        X = torch.cat([X_pv, X_wind, X_load, X_TF], dim=0)  # (4, 24)
+        X_price, X_generation = dataset[i]
+        X = torch.cat([X_price, X_generation], dim=0)  # (2, 24)
 
         X_list.append(X)
-        season_list.append(torch.tensor(s))
-        day_list.append(torch.tensor(d))
 
     if len(X_list) == 0:
         raise ValueError("No samples match the given condition.")
 
     X = torch.stack(X_list)
-    season = torch.stack(season_list)
-    day_type = torch.stack(day_list)
 
     # ========= 反归一化 =========
     if denorm:
         stats = dataset.stats
-        X[:, 0] = X[:, 0] * stats['std']['PV'] + stats['mean']['PV']
-        X[:, 1] = X[:, 1] * stats['std']['Wind'] + stats['mean']['Wind']
-        X[:, 2] = X[:, 2] * stats['std']['Load'] + stats['mean']['Load']
-        X[:, 3] = X[:, 3] * stats['std']['Traffic'] + stats['mean']['Traffic']
+        X[:, 0] = X[:, 0] * stats['std']['Price'] + stats['mean']['Price']
+        X[:, 1] = X[:, 1] * stats['std']['Generation'] + stats['mean']['Generation']
 
     return X
 
 def denormalize_timeseries(x, stats):
     """
-    x: torch.Tensor, (B, 4, L), normalized
+    x: torch.Tensor, (B, 2, L), normalized
     stats: dataset.stats
     """
     x = x.clone()
 
-    x[:, 0] = x[:, 0] * stats['std']['PV'] + stats['mean']['PV']
-    x[:, 1] = x[:, 1] * stats['std']['Wind'] + stats['mean']['Wind']
-    x[:, 2] = x[:, 2] * stats['std']['Load'] + stats['mean']['Load']
-    x[:, 3] = x[:, 3] * stats['std']['Traffic'] + stats['mean']['Traffic']
+    x[:, 0] = x[:, 0] * stats['std']['Price'] + stats['mean']['Price']
+    x[:, 1] = x[:, 1] * stats['std']['Generation'] + stats['mean']['Generation']
 
     return x
 
 def save_generated_by_condition(
     x_fake,
-    season,
-    day_type,
     save_root="./results/generated",
     save_format="csv",  # "npy" or "csv"
 ):
     """
-    x_fake: torch.Tensor, (B, 4, 24), 已反归一化
-    season: int
-    day_type: int 
+    x_fake: torch.Tensor, (B, 2, 24), 已反归一化
     """
 
-    assert x_fake.ndim == 3 and x_fake.shape[1] == 4
+    assert x_fake.ndim == 3 and x_fake.shape[1] == 2
 
-    var_names = ["PV", "Wind", "Load", "Traffic"]
+    var_names = ["Price", "Generation"]
 
     # ===== 保存路径 =====
     save_dir = os.path.join(
         save_root,
-        f"season_{season}_daytype_{day_type}"
+        f"generated"
     )
     os.makedirs(save_dir, exist_ok=True)
 
-    x_fake = x_fake.cpu().numpy()  # (B, 4, 24)
+    x_fake = x_fake.cpu().numpy()  # (B, 2, 24)
 
     for i, var in enumerate(var_names):
         data = x_fake[:, i, :]  # (B, 24)
@@ -212,8 +184,8 @@ def plot_generated_timeseries(
     real_indices=None,
 ):
     """
-    x_fake: torch.Tensor, (Bf, 4, L)
-    x_real: torch.Tensor, (Br, 4, L) or None
+    x_fake: torch.Tensor, (Bf, 2, L)
+    x_real: torch.Tensor, (Br, 2, L) or None
     fake_indices: list[int]
     real_indices: list[int]
     """
@@ -228,12 +200,12 @@ def plot_generated_timeseries(
     if x_real is not None:
         x_real = x_real.cpu().numpy()
 
-    channels = ['PV', 'Wind', 'Load', 'TF']
+    channels = ['Price', 'Generation']
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharex=True)
+    fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
     axes = axes.flatten()
     
-    for c in range(4):
+    for c in range(2):
 
         # ===== fake 数据 =====
         for idx in fake_indices:
@@ -262,11 +234,11 @@ def plot_generated_timeseries(
         axes[c].grid(True)
         axes[c].legend()
 
-    axes[2].set_xlabel('Time step')
-    axes[3].set_xlabel('Time step')
+    axes[1].set_xlabel('Time step')
+    # axes[2].set_xlabel('Time step')
 
     plt.tight_layout()
-    plt.savefig('./results/fake.svg', format="svg", bbox_inches='tight', dpi=300)
+    plt.savefig('./results/fake.png', format="png", bbox_inches='tight', dpi=300)
 
 def data_filter(
     data,
@@ -335,15 +307,17 @@ def data_filter(
 
 def main(arg_dict):
     """"""
-    checkpoints = torch.load(arg_dict['checkpoints'])
+    checkpoints = torch.load(arg_dict['checkpoints'], map_location='cpu', weights_only=True)
     model = NoisePredictor()
     model.load_state_dict(checkpoints)
+    model.eval()
 
-    # real data
+    # real data 按照特定条件筛选真实数据
     dataset = MultiVarTimeSeriesDataset()
-    real = get_timeseries_by_condition(dataset, season=arg_dict["season"], day_type=arg_dict["day_type"])
+    real = get_timeseries_by_condition(dataset)
     # print(len(real))
 
+    # 从训练的模型中采样数据
     # forward process
     fp = ForwardProcess(arg_dict['T'])
 
@@ -355,22 +329,22 @@ def main(arg_dict):
     x_fake1 = denormalize_timeseries(x_fake, dataset.stats)
 
     # 数据过滤
-    x_fake1 = data_filter(x_fake1)
+    # x_fake1 = data_filter(x_fake1)
     print(len(x_fake1))
 
+    # 由模型得到的数据与真实数据进行比较
     # 评估
     evaluator = Evaluator()
-    rea_norm = get_timeseries_by_condition(dataset, season=arg_dict["season"], day_type=arg_dict["day_type"], denorm=False)
+    rea_norm = get_timeseries_by_condition(dataset, denorm=False)
     results = evaluator.evaluate(rea_norm, x_fake)
     results_json = to_json_serializable(results)
-    with open(f"evaluation_results/evaluation_season_{arg_dict['season']}_daytype_{arg_dict['day_type']}.json", "w", encoding="utf-8") as f:
-        json.dump(results_json, f, indent=4, ensure_ascii=False)
+    os.makedirs("evaluation_results", exist_ok=True)
+    with open(f"evaluation_results/evaluation.json", "w", encoding="utf-8") as f:
+        json.dump(results_json, f, indent=2, ensure_ascii=False)
 
     # 保存数据
     save_generated_by_condition(
         x_fake1,
-        season=arg_dict["season"],
-        day_type=arg_dict["day_type"],
         save_root="./results/generated",
         save_format="csv",  # 或 "npy"
     )
@@ -383,11 +357,9 @@ def main(arg_dict):
 if __name__ == '__main__': 
 
     arg_dict = {
-        "checkpoints": './logs/model_v1_nomlp_epoch_5000/model_4999.tar', 
+        "checkpoints": './logs/[04-24]09.16.54/model_4999.tar', 
         "num": 500,  # the number of data you want to generate
         "T": 200,
-        "season": 3,
-        "day_type": 1,
     }
 
     main(arg_dict)

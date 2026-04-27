@@ -6,7 +6,7 @@
 # @author: lemonlover
 # @version: 1.0
 # @eamil: 1920425406@qq.com
-# @desc: evaluation of the generated data
+# @desc: evaluation of the generated data from DM
 
 
 import numpy as np
@@ -25,7 +25,15 @@ class Evaluator:
     """
 
     def __init__(self, var_names=None):
-        self.var_names = var_names or ["PV", "Wind", "Load", "Traffic"]
+        self.var_names = var_names or ["Price", "Generation"]
+
+    def _active_var_names(self, x_real, x_fake):
+        """Use the common channel count of real/fake tensors and align variable names."""
+        c = min(int(x_real.shape[1]), int(x_fake.shape[1]))
+        names = list(self.var_names[:c])
+        if len(names) < c:
+            names.extend([f"var_{i}" for i in range(len(names), c)])
+        return names
 
     # ============================================================
     # Basic statistics
@@ -36,7 +44,7 @@ class Evaluator:
         """
         results = {}
 
-        for i, name in enumerate(self.var_names):
+        for i, name in enumerate(self._active_var_names(x_real, x_fake)):
             real = x_real[:, i, :].reshape(-1)
             fake = x_fake[:, i, :].reshape(-1)
 
@@ -58,7 +66,7 @@ class Evaluator:
         """
         results = {}
 
-        for i, name in enumerate(self.var_names):
+        for i, name in enumerate(self._active_var_names(x_real, x_fake)):
             real = x_real[:, i, :].reshape(-1)
             fake = x_fake[:, i, :].reshape(-1)
 
@@ -96,7 +104,7 @@ class Evaluator:
         Br = x_real.shape[0]
         Bf = x_fake.shape[0]
 
-        for c, name in enumerate(self.var_names):
+        for c, name in enumerate(self._active_var_names(x_real, x_fake)):
             dists = []
             for _ in range(num_pairs):
                 i = np.random.randint(Br)
@@ -171,12 +179,12 @@ class Evaluator:
         x_real = x_real.cpu().numpy()
         x_fake = x_fake.cpu().numpy()
 
-        Br, C, L = x_real.shape
+        Br, _, L = x_real.shape
         Bf = x_fake.shape[0]
 
         results = {}
 
-        for c, name in enumerate(self.var_names):
+        for c, name in enumerate(self._active_var_names(x_real, x_fake)):
             real = x_real[:, c, :]   # (Br, L)
             fake = x_fake[:, c, :]   # (Bf, L)
 
@@ -218,7 +226,7 @@ class Evaluator:
         x_real = x_real.cpu().numpy()
         x_fake = x_fake.cpu().numpy()
 
-        Br, C, L = x_real.shape
+        Br, _, L = x_real.shape
         total = Br * L
 
         lower_q = (1.0 - alpha) / 2.0
@@ -226,7 +234,7 @@ class Evaluator:
 
         results = {}
 
-        for c, name in enumerate(self.var_names):
+        for c, name in enumerate(self._active_var_names(x_real, x_fake)):
             real = x_real[:, c, :]   # (Br, L)
             fake = x_fake[:, c, :]   # (Bf, L)
 
@@ -261,14 +269,18 @@ class Evaluator:
         """
         x_fake = x_fake.cpu().numpy()
 
-        Bf, C, L = x_fake.shape
+        _, C, L = x_fake.shape
 
         lower_q = (1.0 - alpha) / 2.0
         upper_q = 1.0 - lower_q
 
         results = {}
 
-        for c, name in enumerate(self.var_names):
+        names = list(self.var_names[:C])
+        if len(names) < C:
+            names.extend([f"var_{i}" for i in range(len(names), C)])
+
+        for c, name in enumerate(names):
             fake = x_fake[:, c, :]
             width_sum = 0.0
 

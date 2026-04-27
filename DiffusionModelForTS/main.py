@@ -37,7 +37,7 @@ class Trainer:
         self.optimizer = optimizer
         # tensorboard writer
         self.writer = SummaryWriter(self.hyper_params['log_dir'])
-        # loss func
+        # loss func 均方误差损失函数
         self.loss_func = F.mse_loss
 
     def _train_for_epoch(self, epoch):
@@ -46,13 +46,10 @@ class Trainer:
         loop.set_description(f'epoch {epoch}')
         loss_list = []
 
-        for (X_pv, X_wind, X_load, X_TF, season, day_type) in loop:
-            X_pv = X_pv.to(self.device)
-            X_wind = X_wind.to(self.device)
-            X_load = X_load.to(self.device)
-            X_TF = X_TF.to(self.device)
-            season = season.to(self.device)
-            day_type = day_type.to(self.device)
+        # 从数据加载器中获取
+        for (X_price, X_generation) in loop:
+            X_price = X_price.to(self.device)
+            X_generation = X_generation.to(self.device)
 
             # forward process
             # generate the random t
@@ -62,13 +59,16 @@ class Trainer:
             从概率模型的角度，训练不是在模拟轨迹，而是在学习条件分布
             从优化目标的角度来看，随机采样的t才是无偏估计
             """
+            # 将4-variate的时间序列数据进行拼接，作为模型的输入
+            # 最终模型学习到的是4-variate的联合概率分布，即学习了时间相关性与变量相关性
             # concat
-            X = torch.concat([X_pv, X_wind, X_load, X_TF], dim=1)
+            X = torch.concat([X_price, X_generation], dim=1)
             t = torch.randint(0, self.hyper_params["T"], size=(X.shape[0], )).to(self.device)
+            # forward process 前向加噪
             noisy_X, noises = self.fp(X, t)
 
-            # backward process
-            noise_pred = self.model(noisy_X, t, season, day_type)
+            # backward process 使用模型预测噪声！（重点）
+            noise_pred = self.model(noisy_X, t)
 
             loss = self.loss_func(noises, noise_pred)
             self.optimizer.zero_grad()
@@ -107,7 +107,7 @@ class Trainer:
         torch.save(checkpoints, path)
 
 
-
+# 基于真实数据进行训练
 # hyper parameter
 hyper_params = {
     "T": 200,   # time steps
@@ -120,10 +120,10 @@ hyper_params = {
 
 # create the dataset
 dataset = MultiVarTimeSeriesDataset()
-dataloader = DataLoader(
-)
+# 在此处将dataset中的数据加载到dataloader中，设置batch_size和shuffle等参数
+dataloader = DataLoader(dataset, batch_size=hyper_params['batch_size'], shuffle=True)
 # gpu
-device = torch.device('cuda:1' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 # forward process model
 fp = ForwardProcess(hyper_params["T"]).to(device)
