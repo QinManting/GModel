@@ -17,9 +17,10 @@ import torch
 from torch.utils.data import Dataset
 
 def Renewable_energy_with_price():
-    df = pd.read_csv('./data/GS_min15.csv',usecols=['price', 'generation'])
+    df = pd.read_csv('./data/GS_2024.csv',usecols=['price', 'generation', 'season'])
     price = np.array(df['price'])
     generation = np.array(df['generation'])
+    season = np.array(df['season'])
 
     # plt.figure(figsize=(12, 4))
     # plt.plot(pv, linewidth=1)
@@ -28,8 +29,10 @@ def Renewable_energy_with_price():
     # restruct (8760, ) --> (365, 24)
     price = price.reshape(-1,24)
     generation = generation.reshape(-1,24)
+    # season_daily = np.array([season[i * 24] for i in range(366)])
+    season_daily = season[::24]  # 每隔24行取一个元素，得到每天的季节标签
 
-    return price, generation
+    return price, generation, season_daily
 
 class MultiVarTimeSeriesDataset(Dataset):
     """
@@ -39,7 +42,7 @@ class MultiVarTimeSeriesDataset(Dataset):
     """
     def __init__(self):
         # load data
-        self.price, self.generation = Renewable_energy_with_price() # (365, 24) / # (365, )
+        self.price, self.generation, self.season = Renewable_energy_with_price() # (365, 24) / # (365, 24) /# (365, )
 
         self.stats = {}
         self.stats['mean'] = {
@@ -62,8 +65,9 @@ class MultiVarTimeSeriesDataset(Dataset):
     def __getitem__(self, idx):
         X_price = torch.tensor(self.price[idx], dtype=torch.float32).unsqueeze(0)
         X_generation = torch.tensor(self.generation[idx], dtype=torch.float32).unsqueeze(0)
-        return X_price, X_generation
+        season = torch.tensor(self.season[idx], dtype=torch.long)
+        return X_price, X_generation, season
 
 if __name__ == "__main__":
 
-    price, generation = Renewable_energy_with_price()
+    price, generation, season = Renewable_energy_with_price()

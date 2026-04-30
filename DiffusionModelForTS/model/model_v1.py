@@ -17,6 +17,7 @@
 输入：
 x_t      : (B, C=2, L)
 t        : (B,)
+season   : (B,)
 
 输出：
 eps_pred : (B, C=2, L)
@@ -87,6 +88,7 @@ class NoisePredictor(nn.Module):
 
         # ========= 4. 条件 embedding =========
         self.time_emb = SinusoidalTimeEmbedding(d_model)
+        self.season_emb = nn.Embedding(4, d_model)
 
         # ========= 5. Transformer Encoder =========
         encoder_layer = nn.TransformerEncoderLayer(
@@ -104,10 +106,11 @@ class NoisePredictor(nn.Module):
         # ========= 6. 输出投影 =========
         self.output_proj = nn.Linear(d_model, 1)
 
-    def forward(self, x_t, t):
+    def forward(self, x_t, t, season):
         """
         x_t      : (B, 2, 24)
         t        : (B,)
+        season   : (B,)
 
         return:
         eps_pred : (B, 2, 24)
@@ -149,8 +152,9 @@ class NoisePredictor(nn.Module):
 
         # ========= 6. 条件 embedding（广播） =========
         t_emb = self.time_emb(t)                      # (B, d_model)
+        season_emb = self.season_emb(season) 
 
-        cond_emb = t_emb[:, None, :]
+        cond_emb = (t_emb + season_emb)[:, None, :]
         tokens = tokens + cond_emb
 
         # ========= 7. Transformer =========

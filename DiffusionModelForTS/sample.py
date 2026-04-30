@@ -14,7 +14,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from model.model_v1 import NoisePredictor
+from model.model_v2 import NoisePredictor
 
 from evaluate import Evaluator
 from utils import to_json_serializable
@@ -52,12 +52,15 @@ class Sampler:
 
         # 初始化噪声
         xt = torch.randn(size=(B, C, L))
+        
+        # 条件输入
+        season = torch.full((B,), self.arg_dict['season'], dtype=torch.long)
 
         for t in tqdm(reversed(range(T)), desc='Sampling'):
             t_batch = torch.full((B,), t, dtype=torch.long)
 
             # 预测当前噪声
-            noise_pred = self.model(xt, t_batch)
+            noise_pred = self.model(xt, t_batch, season)
 
             # 估计 x0
             sqrt_alpha_cumprod_t = self.sqrt_alphas_cumprod[t]
@@ -87,6 +90,7 @@ class Sampler:
 
 def get_timeseries_by_condition(
     dataset,
+    season=None,
     denorm=True,
 ):
     """
@@ -97,19 +101,27 @@ def get_timeseries_by_condition(
 
     return:
         X: (N, 2, 24)
+        season: (N,)
     """
-    X_list = []
+    X_list, season_list = [], []
 
     for i in range(len(dataset)):
-        X_price, X_generation = dataset[i]
+        s = dataset.season[i]
+
+        if season is not None and s != season:
+            continue
+        
+        X_price, X_generation, season = dataset[i]
         X = torch.cat([X_price, X_generation], dim=0)  # (2, 24)
 
         X_list.append(X)
+        season_list.append(torch.tensor(s))
 
     if len(X_list) == 0:
         raise ValueError("No samples match the given condition.")
 
     X = torch.stack(X_list)
+    season = torch.stack(season_list)
 
     # ========= 反归一化 =========
     if denorm:
@@ -133,11 +145,13 @@ def denormalize_timeseries(x, stats):
 
 def save_generated_by_condition(
     x_fake,
+    season,
     save_root="./results/generated",
     save_format="csv",  # "npy" or "csv"
 ):
     """
     x_fake: torch.Tensor, (B, 2, 24), 已反归一化
+    season: int
     """
 
     assert x_fake.ndim == 3 and x_fake.shape[1] == 2
@@ -147,7 +161,7 @@ def save_generated_by_condition(
     # ===== 保存路径 =====
     save_dir = os.path.join(
         save_root,
-        f"generated"
+        f"season_{season}"
     )
     os.makedirs(save_dir, exist_ok=True)
 
@@ -182,12 +196,14 @@ def plot_generated_timeseries(
     x_real=None,
     fake_indices=None,
     real_indices=None,
+    season=None
 ):
     """
     x_fake: torch.Tensor, (Bf, 2, L)
     x_real: torch.Tensor, (Br, 2, L) or None
     fake_indices: list[int]
     real_indices: list[int]
+    season: int or None
     """
 
     if fake_indices is None:
@@ -238,7 +254,7 @@ def plot_generated_timeseries(
     # axes[2].set_xlabel('Time step')
 
     plt.tight_layout()
-    plt.savefig('./results/fake.png', format="png", bbox_inches='tight', dpi=300)
+    plt.savefig(f'./results/season_{season}_fake.png', format="png", bbox_inches='tight', dpi=300)
 
 def data_filter(
     data,
@@ -314,7 +330,7 @@ def main(arg_dict):
 
     # real data 按照特定条件筛选真实数据
     dataset = MultiVarTimeSeriesDataset()
-    real = get_timeseries_by_condition(dataset)
+    real = get_timeseries_by_condition(dataset, season=arg_dict['season'])
     # print(len(real))
 
     # 从训练的模型中采样数据
@@ -329,37 +345,39 @@ def main(arg_dict):
     x_fake1 = denormalize_timeseries(x_fake, dataset.stats)
 
     # 数据过滤
-    # x_fake1 = data_filter(x_fake1)
+    # x_fake1 = data_filter(x_fake1, season=arg_dict["season"])
     print(len(x_fake1))
 
     # 由模型得到的数据与真实数据进行比较
     # 评估
     evaluator = Evaluator()
-    rea_norm = get_timeseries_by_condition(dataset, denorm=False)
+    rea_norm = get_timeseries_by_condition(dataset, season=arg_dict["season"], denorm=False)
     results = evaluator.evaluate(rea_norm, x_fake)
     results_json = to_json_serializable(results)
     os.makedirs("evaluation_results", exist_ok=True)
-    with open(f"evaluation_results/evaluation.json", "w", encoding="utf-8") as f:
+    with open(f"evaluation_results/season_{arg_dict['season']}_evaluation.json", "w", encoding="utf-8") as f:
         json.dump(results_json, f, indent=2, ensure_ascii=False)
 
     # 保存数据
     save_generated_by_condition(
         x_fake1,
+        season=arg_dict["season"],
         save_root="./results/generated",
         save_format="csv",  # 或 "npy"
     )
     
     # plot
-    plot_generated_timeseries(x_fake1, real)
+    plot_generated_timeseries(x_fake1, real, season=arg_dict["season"])
 
 
 
 if __name__ == '__main__': 
 
     arg_dict = {
-        "checkpoints": './logs/[04-24]09.16.54/model_4999.tar', 
-        "num": 500,  # the number of data you want to generate
+        "checkpoints": './logs/[04-27]20.33.26/model_4999.tar', 
+        "num": 200,  # the number of data you want to generate
         "T": 200,
+        "season": 3,
     }
 
     main(arg_dict)
