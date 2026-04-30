@@ -256,71 +256,6 @@ def plot_generated_timeseries(
     plt.tight_layout()
     plt.savefig(f'./results/season_{season}_fake.png', format="png", bbox_inches='tight', dpi=300)
 
-def data_filter(
-    data,
-    season=None,
-    day_type=None,
-    low_ratio=0.2,
-    high_quantile=0.9,
-    low_quantile=0.1,
-    day_start=6,
-    day_end=18,
-):
-    """
-    基于真实光伏日分布特征的过滤：
-    1. 白天段不允许明显负值（允许小噪声）
-    2. 形态异常过滤（剧烈振荡）
-    3. 季节统计约束（你原逻辑保留）
-    """
-
-    pv = data[:, 0, :]  # (B, 24)
-
-    # ========= 1. 白天物理合理性约束 =========
-    pv_day = pv[:, day_start:day_end]
-    pv_max = pv.max(dim=1).values
-
-    # 允许 2% 峰值的负噪声
-    neg_tol = 0.02 * pv_max
-    valid_mask = pv_day.min(dim=1).values >= -neg_tol
-    data = data[valid_mask]
-
-    pv = data[:, 0, :]
-    pv_max = pv.max(dim=1).values
-
-    # ========= 2. 形态异常过滤 =========
-    tv = torch.mean(torch.abs(pv[:, 1:] - pv[:, :-1]), dim=1)
-    tv_thr = torch.quantile(tv, 0.98)
-    data = data[tv <= tv_thr]
-
-    pv = data[:, 0, :]
-    pv_max = pv.max(dim=1).values
-
-    # ========= 3. 季节统计过滤 =========
-    if season == 1:  # summer
-        low_thr = torch.quantile(pv_max, low_quantile)
-
-        high_mask = pv_max >= low_thr
-        low_mask = pv_max < low_thr
-
-        x_high = data[high_mask]
-        x_low = data[low_mask]
-
-        if x_low.shape[0] > 0:
-            keep_num = max(1, int(low_ratio * x_low.shape[0]))
-            idx = torch.randperm(x_low.shape[0])[:keep_num]
-            x_low = x_low[idx]
-
-        x_filtered = torch.cat([x_high, x_low], dim=0)
-
-    elif season == 3:  # winter
-        high_thr = torch.quantile(pv_max, high_quantile)
-        x_filtered = data[pv_max <= high_thr]
-
-    else:
-        x_filtered = data
-
-    return x_filtered
-
 def main(arg_dict):
     """"""
     checkpoints = torch.load(arg_dict['checkpoints'], map_location='cpu', weights_only=True)
@@ -343,10 +278,10 @@ def main(arg_dict):
     x_fake = sampler.sample()
     # ===== 反归一化 =====
     x_fake1 = denormalize_timeseries(x_fake, dataset.stats)
-
-    # 数据过滤
-    # x_fake1 = data_filter(x_fake1, season=arg_dict["season"])
-    print(len(x_fake1))
+    
+    # 电价信息处理
+    # 小于40的电价设为40，避免过低的电价导致评估指标失真
+    x_fake1[:, 0] = np.clip(x_fake1[:, 0], a_min=40)  
 
     # 由模型得到的数据与真实数据进行比较
     # 评估
@@ -374,7 +309,7 @@ def main(arg_dict):
 if __name__ == '__main__': 
 
     arg_dict = {
-        "checkpoints": './logs/[04-27]20.33.26/model_4999.tar', 
+        "checkpoints": './logs/[04-30]08.57.23_modelv2_wholeyear/model_4864.tar', 
         "num": 200,  # the number of data you want to generate
         "T": 200,
         "season": 3,

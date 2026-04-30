@@ -2,8 +2,8 @@
 # -*- coding: utf-8 -*-
 
 # @file: model_v2.py
-# @time: 2025/12/26
-# @author: lemonlover
+# @time: 2026/04/27
+# @author: qin manting
 # @version: 2.0
 # @desc: v2 - 增强版噪声预测网络
 
