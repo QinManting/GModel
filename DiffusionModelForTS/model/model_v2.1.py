@@ -10,12 +10,9 @@
 """
 模型原理：【时间序列+条件+timestep的条件transformer】，输出噪声ε̂
 
-v2 改进点：
-1. 时间步编码增强：sinusoidal + MLP非线性映射，增强对t的响应
-2. 条件注入方式改进：使用scale+shift（FiLM风格）替代简单相加
-3. 增加跳跃连接：输入与输出拼接后投影，缓解梯度消失
-4. 时间位置编码改用sinusoidal（更适合外推）
-5. 可选：增加dropout正则化
+v2.1 改进点：
+1. 逐时点投影：对每个时间点独立投影，保留时序信息（而非全局展平）
+
 """
 
 import math
@@ -147,6 +144,8 @@ class NoisePredictorV2(nn.Module):
         n_heads=4,
         n_layers=4,
         dropout=0.1,
+        use_skip_connection=True,      # 是否使用跳跃连接
+        use_film_condition=True,        # 是否使用FiLM条件注入
     ):
         super().__init__()
 
@@ -155,10 +154,11 @@ class NoisePredictorV2(nn.Module):
         self.d_model = d_model
 
         # ========= 1. 每个变量的特征提取 =========
-        # (B, L) -> (B, d_model)
+        # 改为对每个时间点做逐点投影，保留时序信息
+        # (B, L, 1) -> (B, L, d_model)
         self.var_proj = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(seq_len, d_model),
+                nn.Linear(1, d_model),
                 nn.GELU(),
                 nn.Linear(d_model, d_model),
                 nn.Dropout(dropout),
@@ -223,16 +223,12 @@ class NoisePredictorV2(nn.Module):
         # ========= 2. 每个变量独立特征提取 =========
         var_tokens = []
         for i in range(self.num_vars):
-            xi = x_t[:, i, :]                     # (B, L)
-            hi = self.var_proj[i](xi)             # (B, d_model)
+            xi = x_t[:, i, :].unsqueeze(-1)      # (B, L, 1)
+            hi = self.var_proj[i](xi)            # (B, L, d_model)
             var_tokens.append(hi)
 
-        # (B, num_vars, d_model)
-        var_tokens = torch.stack(var_tokens, dim=1)
-
-        # ========= 3. 展开为 token 序列 =========
         # (B, num_vars, seq_len, d_model)
-        var_tokens = var_tokens[:, :, None, :].expand(-1, -1, self.seq_len, -1)
+        var_tokens = torch.stack(var_tokens, dim=1)
 
         # ========= 4. 加变量 embedding =========
         var_ids = torch.arange(self.num_vars, device=device)

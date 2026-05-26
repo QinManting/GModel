@@ -128,18 +128,46 @@ class Evaluator:
         """
         Frobenius norm between average correlation matrices
         """
+        def robust_corrcoef(sample, eps=1e-8):
+            """
+            Robust correlation matrix for one sample.
+
+            sample: (C, L)
+            - replaces NaN/Inf with 0
+            - avoids division-by-zero when a channel has near-zero std
+            """
+            s = np.asarray(sample, dtype=np.float64)
+            s = np.nan_to_num(s, nan=0.0, posinf=0.0, neginf=0.0)
+
+            if s.ndim != 2 or s.shape[0] == 0:
+                return np.zeros((0, 0), dtype=np.float64)
+
+            centered = s - s.mean(axis=1, keepdims=True)
+            L = max(centered.shape[1], 1)
+            cov = (centered @ centered.T) / L
+            std = centered.std(axis=1)
+            denom = np.outer(std, std)
+
+            corr = np.divide(cov, denom, out=np.zeros_like(cov), where=denom > eps)
+            np.fill_diagonal(corr, 1.0)
+            return np.clip(corr, -1.0, 1.0)
+
         def avg_corr(x):
             # x: (B, C, L)
             corrs = []
             for i in range(x.shape[0]):
-                corr = np.corrcoef(x[i].cpu().numpy())
+                corr = robust_corrcoef(x[i].cpu().numpy())
                 corrs.append(corr)
+            if len(corrs) == 0:
+                c = int(x.shape[1]) if x.ndim >= 2 else 0
+                return np.eye(c, dtype=np.float64)
             return np.mean(corrs, axis=0)
 
         corr_real = avg_corr(x_real)
         corr_fake = avg_corr(x_fake)
 
-        return np.linalg.norm(corr_real - corr_fake, ord="fro")
+        dist = np.linalg.norm(corr_real - corr_fake, ord="fro")
+        return float(np.nan_to_num(dist, nan=0.0, posinf=1e6, neginf=1e6))
 
     # ============================================================
     # Conditional MMD (RBF kernel)
