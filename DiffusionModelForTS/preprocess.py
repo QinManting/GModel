@@ -46,7 +46,31 @@ def concat_data():
  
 	# 保存合并后的数据
 	df.to_csv("./data/GS_2024.csv", index=False, encoding="utf-8-sig")
+ 
+def sort_data():
+    # 读取数据
+    df = pd.read_csv("./data/GS_2024.csv", encoding="utf-8-sig")
+    
+    # 只按照日期排序，时间不排序
+	# 将日期列转换为datetime，按日期（天）排序，且在同一天内按分钟顺序排序
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+        df["_day"] = df["date"].dt.date
+        df["_minute"] = df["date"].dt.minute
+        df.sort_values(["_day", "_minute"], inplace=True)
+        df.drop(columns=["_day", "_minute"], inplace=True)
+    else:
+        # 如果没有 date 列，尝试解析第一列为日期时间并排序
+        first_col = df.columns[0]
+        df[first_col] = pd.to_datetime(df[first_col])
+        df["_day"] = df[first_col].dt.date
+        df["_minute"] = df[first_col].dt.minute
+        df.sort_values(["_day", "_minute"], inplace=True)
+        df.drop(columns=["_day", "_minute"], inplace=True)
+    # 保存排序后的数据
+    df.to_csv("./data/GS_2024_sorted.csv", index=False, encoding="utf-8-sig")
 
 if __name__ == "__main__":
 	# preprocess_data()
-	concat_data()
+	# concat_data()
+	sort_data()

@@ -157,10 +157,11 @@ class NoisePredictorV2(nn.Module):
         self.d_model = d_model
 
         # ========= 1. 每个变量的特征提取 =========
-        # (B, L) -> (B, d_model)
+        # 改为对每个时间点做逐点投影，保留时序信息
+        # (B, L, 1) -> (B, L, d_model)
         self.var_proj = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(seq_len, d_model),
+                nn.Linear(1, d_model),
                 nn.GELU(),
                 nn.Linear(d_model, d_model),
                 nn.Dropout(dropout),
@@ -225,16 +226,12 @@ class NoisePredictorV2(nn.Module):
         # ========= 2. 每个变量独立特征提取 =========
         var_tokens = []
         for i in range(self.num_vars):
-            xi = x_t[:, i, :]                     # (B, L)
-            hi = self.var_proj[i](xi)             # (B, d_model)
+            xi = x_t[:, i, :].unsqueeze(-1)      # (B, L, 1)
+            hi = self.var_proj[i](xi)            # (B, L, d_model)
             var_tokens.append(hi)
 
-        # (B, num_vars, d_model)
-        var_tokens = torch.stack(var_tokens, dim=1)
-
-        # ========= 3. 展开为 token 序列 =========
         # (B, num_vars, seq_len, d_model)
-        var_tokens = var_tokens[:, :, None, :].expand(-1, -1, self.seq_len, -1)
+        var_tokens = torch.stack(var_tokens, dim=1)
 
         # ========= 4. 加变量 embedding =========
         var_ids = torch.arange(self.num_vars, device=device)

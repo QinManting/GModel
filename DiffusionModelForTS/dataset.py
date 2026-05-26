@@ -17,7 +17,7 @@ import torch
 from torch.utils.data import Dataset
 
 def Renewable_energy_with_price():
-    df = pd.read_csv('./data/GS_2024.csv',usecols=['price', 'generation', 'season'])
+    df = pd.read_csv('./data/GS_2024_sorted.csv',usecols=['price', 'generation', 'season'])
     price = np.array(df['price'])
     generation = np.array(df['generation'])
     season = np.array(df['season'])

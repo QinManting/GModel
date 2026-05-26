@@ -22,6 +22,8 @@ from utils import to_json_serializable
 from forward import ForwardProcess
 from dataset import MultiVarTimeSeriesDataset
 
+from datetime import datetime, timedelta
+
 
 class Sampler:
     """"""
@@ -196,8 +198,9 @@ def plot_generated_timeseries(
     x_real=None,
     fake_indices=None,
     real_indices=None,
-    season=None
-):
+    season=None,
+    results_root="./results",
+   ):
     """
     x_fake: torch.Tensor, (Bf, 2, L)
     x_real: torch.Tensor, (Br, 2, L) or None
@@ -254,7 +257,7 @@ def plot_generated_timeseries(
     # axes[2].set_xlabel('Time step')
 
     plt.tight_layout()
-    plt.savefig(f'./results/season_{season}_fake.png', format="png", bbox_inches='tight', dpi=300)
+    plt.savefig(f'{results_root}/generated/season_{season}_fake.png', format="png", bbox_inches='tight', dpi=300)
 
 def main(arg_dict):
     """"""
@@ -281,7 +284,10 @@ def main(arg_dict):
     
     # 电价信息处理
     # 小于40的电价设为40，避免过低的电价导致评估指标失真
-    x_fake1[:, 0] = np.clip(x_fake1[:, 0], a_min=40)  
+    x_fake1[:, 0] = np.clip(x_fake1[:, 0], a_min=40, a_max=None)  
+    
+    curtime = datetime.now() + timedelta(hours=0)
+    results_root = f"./results/{curtime.strftime('%Y-%m-%d_%H-%M-%S')}" + f"/evaluation_results"
 
     # 由模型得到的数据与真实数据进行比较
     # 评估
@@ -289,30 +295,31 @@ def main(arg_dict):
     rea_norm = get_timeseries_by_condition(dataset, season=arg_dict["season"], denorm=False)
     results = evaluator.evaluate(rea_norm, x_fake)
     results_json = to_json_serializable(results)
-    os.makedirs("evaluation_results", exist_ok=True)
-    with open(f"evaluation_results/season_{arg_dict['season']}_evaluation.json", "w", encoding="utf-8") as f:
+    os.makedirs(results_root, exist_ok=True)
+    with open(f"{results_root}/season_{arg_dict['season']}_evaluation.json", "w", encoding="utf-8") as f:
         json.dump(results_json, f, indent=2, ensure_ascii=False)
 
     # 保存数据
     save_generated_by_condition(
         x_fake1,
         season=arg_dict["season"],
-        save_root="./results/generated",
+        save_root=f"{results_root}/generated",
         save_format="csv",  # 或 "npy"
     )
     
     # plot
-    plot_generated_timeseries(x_fake1, real, season=arg_dict["season"])
+    plot_generated_timeseries(x_fake1, real, season=arg_dict["season"], results_root=results_root)
 
 
 
 if __name__ == '__main__': 
 
     arg_dict = {
-        "checkpoints": './logs/[04-30]08.57.23_modelv2_wholeyear/model_4864.tar', 
+        # 当前采用 linear 编码器，使用的训练数据是按照每天的顺序连接起来的
+        "checkpoints": './logs/[05-25]15.20.09/model_229.tar', 
         "num": 200,  # the number of data you want to generate
         "T": 200,
-        "season": 3,
+        "season": 1,
     }
 
     main(arg_dict)
