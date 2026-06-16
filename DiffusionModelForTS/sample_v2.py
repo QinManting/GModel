@@ -232,7 +232,7 @@ def plot_generated_timeseries_single_season(
                 color='tab:blue',
                 alpha=0.6,
                 linewidth=2,
-                label='Fake' if idx == fake_indices[0] else None
+                label='Sample data' if idx == fake_indices[0] else None
             )
 
         # ===== real 数据 =====
@@ -244,7 +244,7 @@ def plot_generated_timeseries_single_season(
                     alpha=0.6,
                     linewidth=2,
                     linestyle='--',
-                    label='Real' if idx == real_indices[0] else None
+                    label='Real data' if idx == real_indices[0] else None
                 )
 
         axes[c].set_title(channels[c])
@@ -313,7 +313,7 @@ def plot_generated_timeseries_all_seasons(
                     color='tab:blue',
                     alpha=0.6,
                     linewidth=2,
-                    label='Fake' if idx == fake_indices[0] else None
+                    label='Sample data' if idx == fake_indices[0] else None
                 )
 
             # ===== real 数据 =====
@@ -326,7 +326,7 @@ def plot_generated_timeseries_all_seasons(
                         alpha=0.6,
                         linewidth=2,
                         linestyle='--',
-                        label='Real' if idx == real_indices[0] else None
+                        label='Real data' if idx == real_indices[0] else None
                     )
 
             axes[c*4 + season].set_title(f"{channels[c]} - Season {season}")
@@ -427,7 +427,7 @@ if __name__ == '__main__':
 
     arg_dict = {
         # 当前采用 linear 编码器，使用的训练数据是按照每天的顺序连接起来的
-        "checkpoints": './logs/[04-30]08.57.23_modelv2_wholeyear/model_4864.tar', 
+        "checkpoints": './logs/[05-26]19.22.21/model_4999.tar', 
         "num": 200,  # the number of data you want to generate
         "T": 200,
         "single_season": False,  # False: 同时生成4个季节的数据；True: 只生成一个季节的数据

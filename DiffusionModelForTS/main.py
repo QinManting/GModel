@@ -17,29 +17,43 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from model.model_v2 import NoisePredictor
+from model.model_v3 import NoisePredictor
 from forward import ForwardProcess
 from dataset import MultiVarTimeSeriesDataset
 from utils import bulid_log_dir
+import copy
 
 
 
 
 class Trainer:
     """"""
-    def __init__(self, hyper_params, fp, model, optimizer, train_loader, val_loader, device):
+    # def __init__(self, hyper_params, fp, model, ema_model, optimizer, train_loader, val_loader, device):
+    def __init__(self, hyper_params, fp, model, ema_model, optimizer, train_loader, device):
         """"""
         self.hyper_params = hyper_params
         self.train_loader = train_loader
-        self.val_loader = val_loader
+        # self.val_loader = val_loader
         self.device = device
         self.fp = fp
         self.model = model
+        self.ema_model = ema_model
         self.optimizer = optimizer
         # tensorboard writer
         self.writer = SummaryWriter(self.hyper_params['log_dir'])
         # loss func 均方误差损失函数
         self.loss_func = F.mse_loss
+        
+    @torch.no_grad()
+    def update_ema(self, decay=0.999):
+        ema_params = dict(self.ema_model.named_parameters())
+        model_params = dict(self.model.named_parameters())
+
+        for k in ema_params.keys():
+            ema_params[k].data.mul_(decay).add_(
+                model_params[k].data,
+                alpha=1 - decay
+            )
 
     def _train_for_epoch(self, epoch):
         """"""
@@ -68,77 +82,97 @@ class Trainer:
             t = torch.randint(0, self.hyper_params["T"], size=(X.shape[0], )).to(self.device)
             # forward process 前向加噪
             noisy_X, noises = self.fp(X, t)
+            
+            # ===== classifier-free guidance training =====
+            cond_drop_prob = 0.1
+
+            season_input = season.clone()
+
+            drop_mask = (
+                torch.rand(season.shape, device=self.device)
+                < cond_drop_prob
+            )
+
+            # 4 表示 null condition
+            season_input[drop_mask] = 4
 
             # backward process 使用模型预测噪声！（重点）
-            noise_pred = self.model(noisy_X, t, season)
+            noise_pred = self.model(noisy_X, t, season_input)
 
             loss = self.loss_func(noises, noise_pred)
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
+            self.update_ema()
 
             # 记录损失
             loss_list.append(loss.detach().cpu().item())
         
         return float(sum(loss_list) / len(loss_list))
 
-    @torch.no_grad()
-    def _validate_for_epoch(self, epoch):
-        """Compute validation loss for current epoch."""
-        self.model.eval()
-        loss_list = []
-        for (X_price, X_generation, season) in self.val_loader:
-            X_price = X_price.to(self.device)
-            X_generation = X_generation.to(self.device)
-            season = season.to(self.device)
+    # @torch.no_grad()
+    # def _validate_for_epoch(self, epoch):
+    #     """Compute validation loss for current epoch."""
+    #     self.ema_model.eval()
+    #     loss_list = []
+    #     for (X_price, X_generation, season) in self.val_loader:
+    #         X_price = X_price.to(self.device)
+    #         X_generation = X_generation.to(self.device)
+    #         season = season.to(self.device)
+            
+    #         # torch.randint 的 generator 需要是 CPU generator，随后再把结果搬到目标设备
+    #         g = torch.Generator(device='cpu')
+    #         g.manual_seed(42)
 
-            X = torch.concat([X_price, X_generation], dim=1)
-            t = torch.randint(0, self.hyper_params["T"], size=(X.shape[0], )).to(self.device)
-            noisy_X, noises = self.fp(X, t)
-            noise_pred = self.model(noisy_X, t, season)
-            loss = self.loss_func(noises, noise_pred)
-            loss_list.append(loss.detach().cpu().item())
+    #         X = torch.concat([X_price, X_generation], dim=1)
+    #         t = torch.randint(0, self.hyper_params["T"], size=(X.shape[0], ), generator=g).to(self.device)
+    #         noisy_X, noises = self.fp(X, t)
+    #         noise_pred = self.ema_model(noisy_X, t, season)
+    #         loss = self.loss_func(noises, noise_pred)
+    #         loss_list.append(loss.detach().cpu().item())
 
-        self.model.train()
-        return float(sum(loss_list) / len(loss_list))
+    #     self.model.train()
+    #     return float(sum(loss_list) / len(loss_list))
 
 
     def train(self):
         """"""
-        best_val = float('inf')
-        patience = 0
-        early_stop_patience = self.hyper_params.get('early_stop_patience', 50)
 
+        # for epoch in range(self.hyper_params['num_epochs']):
+
+        #     # train for epoch
+        #     train_loss = self._train_for_epoch(epoch)
+
+        #     # validate
+        #     # val_loss = self._validate_for_epoch(epoch)
+
+        #     # 记录日志到 tensorboard
+        #     self.writer.add_scalar('loss/train', train_loss, epoch)
+        #     # self.writer.add_scalar('loss/val', val_loss, epoch)
+
+        # # 保存最优模型
+        # self._save_model(epoch, min=True)
+        
         for epoch in range(self.hyper_params['num_epochs']):
-
             # train for epoch
-            train_loss = self._train_for_epoch(epoch)
+            loss = self._train_for_epoch(epoch)
 
-            # validate
-            val_loss = self._validate_for_epoch(epoch)
 
-            # 记录日志到 tensorboard
-            self.writer.add_scalar('loss/train', train_loss, epoch)
-            self.writer.add_scalar('loss/val', val_loss, epoch)
-
-            # 保存最优模型并实现早停
-            if val_loss < best_val:
-                best_val = val_loss
-                patience = 0
+            if (epoch+1) % 500 == 0:
                 self._save_model(epoch, min=True)
-            else:
-                patience += 1
 
-            if patience >= early_stop_patience:
-                print(f"Early stopping at epoch {epoch}, best_val={best_val:.6f}")
-                break
+
+            # 记录日志
+            self.writer.add_scalar(tag='loss', scalar_value=loss, global_step=epoch)
+
+
 
     def _save_model(self, epoch, min=False):
         """
         """
         if not os.path.exists(self.hyper_params['log_dir']):
             os.makedirs(self.hyper_params['log_dir'])
-        checkpoints = self.model.state_dict()
+        checkpoints = self.ema_model.state_dict()
         path = self.hyper_params['log_dir'] + f'/model_{epoch}.tar'
         print(f'==> Saving checkpoints: {epoch}')
         torch.save(checkpoints, path)
@@ -150,30 +184,30 @@ hyper_params = {
     "T": 200,   # time steps
     "batch_size": 16,
     "lr": 2e-5,
-    "num_epochs": 5000,
+    "num_epochs": 2000,
     "weight_decay": 1e-4,
     "log_dir": bulid_log_dir(dir='./logs'),
-    "val_ratio": 0.15,
-    "early_stop_patience": 5000
+    # "val_ratio": 0.15
 }
 
 
 # create the dataset
 dataset = MultiVarTimeSeriesDataset()
 # 在此处将dataset按时间序列切分为训练/验证集，设置batch_size和shuffle等参数
-N = len(dataset)
-val_ratio = hyper_params.get('val_ratio')
-val_size = int(N * val_ratio)
-train_size = N - val_size
-# 时间序列切分：前 train_size 为训练，后 val_size 为验证
-train_indices = list(range(0, train_size))
-val_indices = list(range(train_size, N))
-from torch.utils.data import Subset
-train_dataset = Subset(dataset, train_indices)
-val_dataset = Subset(dataset, val_indices)
+# N = len(dataset)
+# val_ratio = hyper_params.get('val_ratio')
+# val_size = int(N * val_ratio)
+# train_size = N - val_size
+# # 时间序列切分：前 train_size 为训练，后 val_size 为验证
+# train_indices = list(range(0, train_size))
+# val_indices = list(range(train_size, N))
+# from torch.utils.data import Subset
+# train_dataset = Subset(dataset, train_indices)
+# val_dataset = Subset(dataset, val_indices)
 
-train_loader = DataLoader(train_dataset, batch_size=hyper_params['batch_size'], shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=hyper_params['batch_size'], shuffle=False)
+# train_loader = DataLoader(train_dataset, batch_size=hyper_params['batch_size'], shuffle=False)
+# val_loader = DataLoader(val_dataset, batch_size=hyper_params['batch_size'], shuffle=False)
+train_loader = DataLoader(dataset, batch_size=hyper_params['batch_size'], shuffle=False)    
 # gpu
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
@@ -182,8 +216,19 @@ fp = ForwardProcess(hyper_params["T"]).to(device)
 
 # noise predictor
 model = NoisePredictor().to(device)
+
+ema_model = copy.deepcopy(model)
+ema_model.eval()
+
+# EMA模型不参与梯度
+for p in ema_model.parameters():
+    p.requires_grad_(False)
+
 # optimizer
 optimizer = optim.AdamW(model.parameters(), lr=hyper_params['lr'], weight_decay=hyper_params['weight_decay'])
 
-trainer = Trainer(hyper_params, fp, model, optimizer, train_loader, val_loader, device)
+# trainer = Trainer(hyper_params, fp, model, ema_model, optimizer, train_loader, val_loader, device)
+trainer = Trainer(hyper_params, fp, model, ema_model, optimizer, train_loader, device)
 trainer.train()
+
+print(sum(p.numel() for p in model.parameters() if p.requires_grad))

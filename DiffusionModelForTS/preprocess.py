@@ -70,7 +70,23 @@ def sort_data():
     # 保存排序后的数据
     df.to_csv("./data/GS_2024_sorted.csv", index=False, encoding="utf-8-sig")
 
+# def scale_data():
+# 	# 读取数据
+# 	df = pd.read_csv("./data/GS_2024_sorted.csv", encoding="utf-8-sig")
+	
+# 	# 对 price 和 generation 列进行归一化处理
+# 	for col in ["generation"]:
+# 		if col in df.columns:
+# 			min_val = 0  # 将最小值固定为0
+# 			max_val = df[col].max()
+# 			if max_val > min_val:  # 避免除以零
+# 				df[col] = (df[col] - min_val) / (max_val - min_val) * 150
+	
+# 	# 保存归一化后的数据
+# 	df.to_csv("./data/GS_2024_sorted_scaled.csv", index=False, encoding="utf-8-sig")
+
 if __name__ == "__main__":
 	# preprocess_data()
 	# concat_data()
 	sort_data()
+	# scale_data()
