@@ -13,7 +13,9 @@
 v3 改进点：
 1. Token顺序改为时序交错（[g1,p1,g2,p2,...]），更符合时间序列的自然结构
 2. 跳跃连接输入对齐为interleaved: 把跳跃输入 x_t_flat 的展平顺序由 (B, C*L, 1) 改为先 permute(0,2,1) 再 reshape(B, L*C, 1)，与 interleaved tokens 对齐。
+3. 逐时点投影：对每个时间点独立投影，保留时序信息（而非全局展平）
 
+缺点：3.需要的数据量过大（48个token）
 """
 
 import math

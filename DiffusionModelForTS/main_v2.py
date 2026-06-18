@@ -23,16 +23,12 @@ from dataset import MultiVarTimeSeriesDataset
 from utils import bulid_log_dir
 
 
-
-
 class Trainer:
     """"""
-    # def __init__(self, hyper_params, fp, model, optimizer, train_loader, val_loader, device):
     def __init__(self, hyper_params, fp, model, optimizer, train_loader, device):
         """"""
         self.hyper_params = hyper_params
         self.train_loader = train_loader
-        # self.val_loader = val_loader
         self.device = device
         self.fp = fp
         self.model = model
@@ -83,46 +79,19 @@ class Trainer:
         
         return float(sum(loss_list) / len(loss_list))
 
-    @torch.no_grad()
-    def _validate_for_epoch(self, epoch):
-        """Compute validation loss for current epoch."""
-        self.model.eval()
-        loss_list = []
-        for (X_price, X_generation, season) in self.val_loader:
-            X_price = X_price.to(self.device)
-            X_generation = X_generation.to(self.device)
-            season = season.to(self.device)
-
-            X = torch.concat([X_price, X_generation], dim=1)
-            t = torch.randint(0, self.hyper_params["T"], size=(X.shape[0], )).to(self.device)
-            noisy_X, noises = self.fp(X, t)
-            noise_pred = self.model(noisy_X, t, season)
-            loss = self.loss_func(noises, noise_pred)
-            loss_list.append(loss.detach().cpu().item())
-
-        self.model.train()
-        return float(sum(loss_list) / len(loss_list))
-
-
     def train(self):
-        """"""
-
+        """Train the model."""
         for epoch in range(self.hyper_params['num_epochs']):
             # train for epoch
             loss = self._train_for_epoch(epoch)
-
-
             if (epoch+1) % 500 == 0:
                 self._save_model(epoch, min=True)
-
-
             # 记录日志
             self.writer.add_scalar(tag='loss', scalar_value=loss, global_step=epoch)
 
 
     def _save_model(self, epoch, min=False):
-        """
-        """
+        """Save the model."""
         if not os.path.exists(self.hyper_params['log_dir']):
             os.makedirs(self.hyper_params['log_dir'])
         checkpoints = self.model.state_dict()
@@ -145,20 +114,6 @@ hyper_params = {
 
 # create the dataset
 dataset = MultiVarTimeSeriesDataset()
-# 在此处将dataset按时间序列切分为训练/验证集，设置batch_size和shuffle等参数
-N = len(dataset)
-# val_ratio = hyper_params.get('val_ratio')
-# val_size = int(N * val_ratio)
-# train_size = N - val_size
-# 时间序列切分：前 train_size 为训练，后 val_size 为验证
-# train_indices = list(range(0, train_size))
-# val_indices = list(range(train_size, N))
-# from torch.utils.data import Subset
-# train_dataset = Subset(dataset, train_indices)
-# val_dataset = Subset(dataset, val_indices)
-
-# train_loader = DataLoader(train_dataset, batch_size=hyper_params['batch_size'], shuffle=True)
-# val_loader = DataLoader(val_dataset, batch_size=hyper_params['batch_size'], shuffle=False)
 train_loader = DataLoader(dataset, batch_size=hyper_params['batch_size'], shuffle=False)
 # gpu
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')

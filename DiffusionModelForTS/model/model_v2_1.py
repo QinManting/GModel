@@ -1,17 +1,17 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-# @file: model_v2.py
-# @time: 2026/04/27
+# @file: model_v2_1.py
+# @time: 2026/05/26
 # @author: qin manting
-# @version: 2.0
-# @desc: v2 - 增强版噪声预测网络
+# @version: 2.1
+# @desc: v2_1 - 增强版噪声预测网络
 
 """
 模型原理：【时间序列+条件+timestep的条件transformer】，输出噪声ε̂
 
-v2.1 改进点：
-1. 逐时点投影：对每个时间点独立投影，保留时序信息（而非全局展平）
+v2_1 改进点：
+1.
 
 """
 
@@ -96,41 +96,7 @@ class TimeStepEncoding(nn.Module):
         return x * (1 + scale) + shift
 
 
-class SeasonConditionEncoding(nn.Module):
-    """季节条件的FiLM注入"""
-    
-    def __init__(self, num_seasons=4, d_model=128):
-        super().__init__()
-        self.season_emb = nn.Embedding(num_seasons, d_model)
-        
-        self.scale_net = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.SiLU(),
-            nn.Linear(d_model, d_model),
-        )
-        self.shift_net = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.SiLU(),
-            nn.Linear(d_model, d_model),
-        )
-        
-        # 初始化
-        self.scale_net[-1].weight.data.zero_()
-        self.scale_net[-1].bias.data.zero_()
-        self.shift_net[-1].weight.data.zero_()
-        self.shift_net[-1].bias.data.zero_()
-    
-    def forward(self, x, season):
-        """
-        x: (B, N, d_model)
-        season: (B,)
-        return: (B, N, d_model)
-        """
-        season_emb = self.season_emb(season)  # (B, d_model)
-        scale = self.scale_net(season_emb)[:, None, :]
-        shift = self.shift_net(season_emb)[:, None, :]
-        
-        return x * (1 + scale) + shift
+# SeasonConditionEncoding 已替换为 Season Token（见 NoisePredictorV2 内联实现）
 
 
 class NoisePredictorV2(nn.Module):
@@ -144,8 +110,6 @@ class NoisePredictorV2(nn.Module):
         n_heads=4,
         n_layers=4,
         dropout=0.1,
-        use_skip_connection=True,      # 是否使用跳跃连接
-        use_film_condition=True,        # 是否使用FiLM条件注入
     ):
         super().__init__()
 
@@ -153,31 +117,27 @@ class NoisePredictorV2(nn.Module):
         self.seq_len = seq_len
         self.d_model = d_model
 
-        # ========= 1. 每个变量的特征提取 =========
-        # 改为对每个时间点做逐点投影，保留时序信息
-        # (B, L, 1) -> (B, L, d_model)
-        self.var_proj = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(1, d_model),
-                nn.GELU(),
-                nn.Linear(d_model, d_model),
-                nn.Dropout(dropout),
-            )
-            for _ in range(num_vars)
-        ])
-
-        # ========= 2. 变量 embedding =========
-        self.var_emb = nn.Embedding(num_vars, d_model)
+        # ========= 1. 输入投影：将2个变量特征映射到 d_model =========
+        # 输入 (B, 24, 2) -> Linear(2, d_model) -> (B, 24, d_model)
+        self.input_linear = nn.Sequential(
+            nn.Linear(num_vars, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+            nn.Dropout(dropout),
+        )
 
         # ========= 3. 时间位置编码（sinusoidal，可外推）=========
-        self.pos_encoding = SinusoidalTimeEmbedding(d_model)  # 复用sinusoidal实现
+        # 为24个时间步生成位置编码
+        self.pos_encoding = SinusoidalTimeEmbedding(d_model)
         
         # ========= 4. 条件编码 =========
         self.time_emb = SinusoidalTimeEmbedding(d_model)
         
-        # FiLM风格的条件注入
+        # FiLM风格的条件注入（仅用于time step）
         self.time_condition = TimeStepEncoding(d_model)
-        self.season_condition = SeasonConditionEncoding(4, d_model)
+        # Season Token: 可学习的季节嵌入，作为特殊token拼接到序列中
+        # 嵌入维度 = num_seasons + 1（+1 用于 CFG 无条件的 null token）
+        self.season_token = nn.Embedding(5, d_model)
         # ========= 5. Transformer Encoder =========
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -192,86 +152,67 @@ class NoisePredictorV2(nn.Module):
         )
 
         # ========= 6. 跳跃连接投影 =========
-        # 将输入特征与Transformer输出拼接后投影
-        self.input_proj = nn.Linear(1, d_model)
         self.skip_proj = nn.Linear(d_model * 2, d_model)
-        
+
         # ========= 7. 输出投影 =========
-        self.output_proj = nn.Linear(d_model, 1)
+        self.output_proj = nn.Linear(d_model, num_vars)
         
         # ========= 8. LayerNorm（可选） =========
         self.final_norm = nn.LayerNorm(d_model)
 
     def forward(self, x_t, t, season):
         """
-        x_t      : (B, num_vars, seq_len)
+        x_t      : (B, num_vars, seq_len)  即 (B, 2, 24)
         t        : (B,)
         season   : (B,)
 
         return:
-        eps_pred : (B, num_vars, seq_len)
+        eps_pred : (B, num_vars, seq_len)  即 (B, 2, 24)
         """
         B, C, L = x_t.shape
         assert C == self.num_vars and L == self.seq_len
 
         device = x_t.device
 
-        # ========= 1. 保存跳跃连接的输入 =========
-        # 将输入展平为 (B, N, 1) 用于后续拼接
-        x_t_flat = x_t.reshape(B, C * L, 1)  # (B, N, 1)
+        # ========= 1. 转置输入：(B, 2, 24) -> (B, 24, 2) =========
+        x_t_seq = x_t.permute(0, 2, 1)  # (B, 24, 2)
 
-        # ========= 2. 每个变量独立特征提取 =========
-        var_tokens = []
-        for i in range(self.num_vars):
-            xi = x_t[:, i, :].unsqueeze(-1)      # (B, L, 1)
-            hi = self.var_proj[i](xi)            # (B, L, d_model)
-            var_tokens.append(hi)
+        # ========= 2. 保存跳跃连接的原始输入 =========
+        skip_input = x_t_seq  # (B, 24, 2)
 
-        # (B, num_vars, seq_len, d_model)
-        var_tokens = torch.stack(var_tokens, dim=1)
+        # ========= 3. 输入投影：(B, 24, 2) -> (B, 24, d_model) =========
+        tokens = self.input_linear(x_t_seq)  # (B, 24, d_model)
 
-        # ========= 4. 加变量 embedding =========
-        var_ids = torch.arange(self.num_vars, device=device)
-        var_emb = self.var_emb(var_ids)[None, :, None, :]  # (1, num_vars, 1, d_model)
-        var_tokens = var_tokens + var_emb
-
-        # ========= 5. 加时间位置编码（sinusoidal）=========
-        # 为每个时间步生成位置编码
+        # ========= 4. 加时间位置编码 =========
         pos_emb = self.pos_encoding(torch.arange(self.seq_len, device=device).float())
-        # (seq_len, d_model) -> (1, 1, seq_len, d_model)
-        pos_emb = pos_emb[None, None, :, :]
-        var_tokens = var_tokens + pos_emb
+        # (seq_len, d_model) -> (1, seq_len, d_model)
+        tokens = tokens + pos_emb[None, :, :]
 
-        # ========= 6. reshape 成 Transformer tokens =========
-        # (B, num_vars * seq_len, d_model)
-        tokens = var_tokens.reshape(B, self.num_vars * self.seq_len, self.d_model)
+        # ========= 5. 加入 Season Token =========
+        season_emb = self.season_token(season)[:, None, :]  # (B, 1, d_model)
+        tokens = torch.cat([season_emb, tokens], dim=1)  # (B, 25, d_model)
 
-        # ========= 7. 条件注入 =========
+        # ========= 6. 时间步条件注入（FiLM） =========
         t_emb = self.time_emb(t)  # (B, d_model)
-        
-        # FiLM风格：scale + shift
         tokens = self.time_condition(tokens, t_emb)
-        tokens = self.season_condition(tokens, season)
 
-        # ========= 8. Transformer =========
-        tokens = self.transformer(tokens)
+        # ========= 7. Transformer =========
+        tokens = self.transformer(tokens)  # (B, 25, d_model)
+
+        # ========= 8. 移除 Season Token =========
+        tokens = tokens[:, 1:, :]  # (B, 24, d_model)
 
         # ========= 9. 跳跃连接 =========
-        # 提取原始输入的投影（对齐维度）
-        # 将 x_t_flat 通过投影对齐到 d_model
-        input_feat = self.input_proj(x_t_flat)  # (B, N, d_model)
-        
-        # 拼接并投影
-        combined = torch.cat([input_feat, tokens], dim=-1)  # (B, N, 2*d_model)
-        tokens = self.skip_proj(combined)
-            
+        skip_feat = self.input_linear(skip_input)  # (B, 24, d_model)
+        combined = torch.cat([skip_feat, tokens], dim=-1)  # (B, 24, 2*d_model)
+        tokens = self.skip_proj(combined)  # (B, 24, d_model)
+
         # ========= 10. 输出投影 =========
         tokens = self.final_norm(tokens)
-        
-        out = self.output_proj(tokens)  # (B, N, 1)
+        out = self.output_proj(tokens)  # (B, 24, num_vars)
 
-        # 还原为 (B, num_vars, seq_len)
-        noises_pred = out.view(B, self.num_vars, self.seq_len)
+        # ========= 11. 转回原始格式：(B, 24, 2) -> (B, 2, 24) =========
+        noises_pred = out.permute(0, 2, 1)  # (B, 2, 24)
 
         return noises_pred
 

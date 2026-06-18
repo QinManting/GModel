@@ -6,7 +6,7 @@
 # @author: lemonlover
 # @version: 1.0
 # @eamil: 1920425406@qq.com
-# @desc: Sample the data based on a trained model
+# @desc: Sample the data based on a trained model with DDIM + CFG
 
 import os
 import json
@@ -26,26 +26,22 @@ from datetime import datetime, timedelta
 
 
 class Sampler:
-    """"""
+    """支持 DDIM + CFG 的采样器"""
     def __init__(self, arg_dict, model, fp) -> None:
         
         self.arg_dict = arg_dict
         self.model = model
         self.fp = fp
 
-        # betas parameters of forward process
-        self.betas = fp.betas
-        self.sqrt_one_minus_alphas_cumprod = fp.sqrt_one_minus_alphas_cumprod
-        self.sqrt_recip_alphas = fp.sqrt_recip_alphas
-        self.sqrt_alphas_cumprod = fp.sqrt_alphas_cumprod
-        # p[x(t-1)|x(t)]下的方差
-        self.posterior_variance = fp.posterior_variance
-        
+        # DDIM 采样步数（默认 50）
+        self.ddim_steps = arg_dict.get('ddim_steps', 50)
         # CFG scale（默认 2.5）
         self.cfg_scale = arg_dict.get('cfg_scale', 2.5)
 
-        # stepsize
-        self.stepsize = 30
+        # betas / alphas_cumprod
+        self.alphas_cumprod = fp.alphas_cumprod  # (T,)
+        self.sqrt_alphas_cumprod = fp.sqrt_alphas_cumprod
+        self.sqrt_one_minus_alphas_cumprod = fp.sqrt_one_minus_alphas_cumprod
 
 
     @torch.no_grad()
@@ -63,35 +59,42 @@ class Sampler:
         # CFG null token (id=4)
         null_season = torch.full((B,), 4, dtype=torch.long)
 
-        for t in tqdm(reversed(range(T)), desc='Sampling'):
+        # ========= DDIM: 构造子序列时间步 =========
+        # 均匀选取 ddim_steps 个时间步
+        if self.ddim_steps >= T:
+            timesteps = list(reversed(range(T)))
+        else:
+            # 均匀采样 ddim_steps 个时间步（从 T-1 向下到 0）
+            timesteps = [int(T * i / self.ddim_steps) for i in range(self.ddim_steps)]
+            timesteps = timesteps[::-1]  # 从大到小排列
+            # 确保最后一步是 0
+            if timesteps[-1] != 0:
+                timesteps[-1] = 0
+
+        for i, t in enumerate(tqdm(timesteps, desc='DDIM Sampling')):
             t_batch = torch.full((B,), t, dtype=torch.long)
-            # noise_pred = self.model(xt, t_batch, season)
-            
+
             # ========= CFG: 同时计算有条件和无条件预测 =========
             noise_cond = self.model(xt, t_batch, season)
             noise_uncond = self.model(xt, t_batch, null_season)
             # 引导组合
             noise_pred = noise_uncond + self.cfg_scale * (noise_cond - noise_uncond)
 
-            # 估计 x0
-            sqrt_alpha_cumprod_t = self.sqrt_alphas_cumprod[t]
-            sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t]
-            x0_pred = (xt - sqrt_one_minus_alpha_cumprod_t * noise_pred) / sqrt_alpha_cumprod_t
+            # ========= DDIM 更新 =========
+            sqrt_ac = self.sqrt_alphas_cumprod[t]
+            sqrt_one_minus_ac = self.sqrt_one_minus_alphas_cumprod[t]
+
+            # 预测 x0: x0 = (x_t - sqrt(1-α̅_t) * ε) / sqrt(α̅_t)
+            x0_pred = (xt - sqrt_one_minus_ac * noise_pred) / sqrt_ac
 
             if t > 0:
-                # 后验均值 μ_t
-                alpha_t = self.fp.alphas[t]
-                alpha_cumprod_prev = self.fp.alphas_cumprod[t-1]
-                beta_t = self.fp.betas[t]
+                # 找到前一个时间步
+                prev_t = timesteps[i + 1] if i + 1 < len(timesteps) else 0
+                sqrt_ac_prev = self.sqrt_alphas_cumprod[prev_t]
+                sqrt_one_minus_ac_prev = self.sqrt_one_minus_alphas_cumprod[prev_t]
 
-                mu_t = (torch.sqrt(alpha_cumprod_prev) * beta_t / (1 - self.fp.alphas_cumprod[t])) * x0_pred \
-                    + (torch.sqrt(alpha_t) * (1 - alpha_cumprod_prev) / (1 - self.fp.alphas_cumprod[t])) * xt
-
-                # 后验方差 σ_t
-                sigma_t = torch.sqrt(self.fp.posterior_variance[t])
-
-                # 采样 x_{t-1}
-                xt = mu_t + sigma_t * torch.randn_like(xt)
+                # DDIM 确定性更新: x_{prev} = sqrt(α̅_prev) * x0 + sqrt(1-α̅_prev) * ε
+                xt = sqrt_ac_prev * x0_pred + sqrt_one_minus_ac_prev * noise_pred
             else:
                 xt = x0_pred
 
@@ -337,9 +340,7 @@ def plot_generated_timeseries_all_seasons(
                         linestyle='--',
                         label='Real data' if idx == real_indices[0] else None
                     )
-            # 输出绘制了多少数据
-            print(f"Season {season}: {len(fake_indices)} fake data, {len(real_indices)} real data")
-            
+
             axes[c*4 + season].set_title(f"{channels[c]} - Season {season}")
             axes[c*4 + season].set_ylabel(channels[c])
             axes[c*4 + season].grid(True)
@@ -428,6 +429,7 @@ def main(arg_dict):
             
             x_real = get_timeseries_by_condition(dataset, season=season)
             x_real_seasons.append(x_real)
+            
 
         plot_generated_timeseries_all_seasons(x_fake_seasons, x_real_seasons, results_root=results_root)
 
@@ -440,7 +442,8 @@ if __name__ == '__main__':
         "checkpoints": './logs/[06-17]19.39.59 cfg=0.05/model_4999.tar', 
         "num": 1460,  # the number of data you want to generate
         "T": 200,
-        "cfg_scale": 1.5,  # CFG 引导强度
+        "ddim_steps": 50,  # DDIM 采样步数（原200步→50步，速度提升4倍）
+        "cfg_scale": 1.5,  # CFG 引导强度（1.5~2.5 之间）
         "single_season": False,  # False: 同时生成4个季节的数据；True: 只生成一个季节的数据
         "season": 0,
     }
