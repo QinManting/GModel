@@ -218,10 +218,12 @@ def plot_generated_timeseries_single_season(
     """
 
     if fake_indices is None:
-        fake_indices = list(range(min(100, x_fake.shape[0])))
+        # fake_indices = list(range(min(100, x_fake.shape[0])))
+        fake_indices = list(range(x_fake.shape[0]))
 
     if x_real is not None and real_indices is None:
-        real_indices = list(range(min(100, x_real.shape[0])))
+        # real_indices = list(range(min(100, x_real.shape[0])))
+        real_indices = list(range(x_fake.shape[0]))
 
     x_fake = x_fake.cpu().numpy()
     if x_real is not None:
@@ -301,11 +303,12 @@ def plot_generated_timeseries_all_seasons(
 
     if fake_indices is None:
         min_bf = min(arr.shape[0] for arr in x_fake_list)
-        fake_indices = list(range(min(100, min_bf)))
-
+        # fake_indices = list(range(min(100, min_bf)))
+        fake_indices = list(range(min_bf))
     if x_real_list is not None and real_indices is None:
         min_br = min(arr.shape[0] for arr in x_real_list)
-        real_indices = list(range(min(100, min_br)))
+        # real_indices = list(range(min(100, min_br)))
+        real_indices = list(range(min_bf))
 
     channels = ['Price', 'Generation']
 
@@ -373,8 +376,8 @@ def main(arg_dict):
         x_fake1 = denormalize_timeseries(x_fake, dataset.stats)
         
         # 电价信息处理
-        # 小于40的电价设为40，避免过低的电价导致评估指标失真
-        x_fake1[:, 0] = np.clip(x_fake1[:, 0], a_min=40, a_max=None)  
+        # 小于40的电价设为40, 大于650的电价设为650，避免过低的电价导致评估指标失真
+        x_fake1[:, 0] = np.clip(x_fake1[:, 0], a_min=40, a_max=650)  
         
         # 由模型得到的数据与真实数据进行比较
         # 评估
@@ -406,7 +409,7 @@ def main(arg_dict):
             arg_dict['season'] = season
             x_fake = sampler.sample()
             x_fake1 = denormalize_timeseries(x_fake, dataset.stats)
-            x_fake1[:, 0] = np.clip(x_fake1[:, 0], a_min=40, a_max=None)  
+            x_fake1[:, 0] = np.clip(x_fake1[:, 0], a_min=40, a_max=650)  
             x_fake_seasons.append(x_fake1)
 
             # 由模型得到的数据与真实数据进行比较
@@ -438,8 +441,8 @@ if __name__ == '__main__':
     arg_dict = {
         # 当前采用 linear 编码器，使用的训练数据是按照每天的顺序连接起来的
         "checkpoints": './logs/[06-17]19.39.59 cfg=0.05/model_4999.tar', 
-        "num": 1460,  # the number of data you want to generate
-        "T": 200,
+        "num": 100,  # the number of data you want to generate
+        "T": 400,
         "cfg_scale": 1.5,  # CFG 引导强度
         "single_season": False,  # False: 同时生成4个季节的数据；True: 只生成一个季节的数据
         "season": 0,

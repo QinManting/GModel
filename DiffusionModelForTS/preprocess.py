@@ -49,7 +49,7 @@ def concat_data():
  
 def sort_data():
     # 读取数据
-    df = pd.read_csv("./data/GS_2024.csv", encoding="utf-8-sig")
+    df = pd.read_csv("./data/GS_2024_scaled.csv", encoding="utf-8-sig")
     
     # 只按照日期排序，时间不排序
 	# 将日期列转换为datetime，按日期（天）排序，且在同一天内按分钟顺序排序
@@ -68,25 +68,41 @@ def sort_data():
         df.sort_values(["_day", "_minute"], inplace=True)
         df.drop(columns=["_day", "_minute"], inplace=True)
     # 保存排序后的数据
-    df.to_csv("./data/GS_2024_sorted.csv", index=False, encoding="utf-8-sig")
+    df.to_csv("./data/GS_2024_scaled_sorted.csv", index=False, encoding="utf-8-sig")
 
-# def scale_data():
-# 	# 读取数据
-# 	df = pd.read_csv("./data/GS_2024_sorted.csv", encoding="utf-8-sig")
+def scale_data():
+	# 读取数据
+	df = pd.read_csv("./data/GS_2024_sorted.csv", encoding="utf-8-sig")
 	
-# 	# 对 price 和 generation 列进行归一化处理
-# 	for col in ["generation"]:
-# 		if col in df.columns:
-# 			min_val = 0  # 将最小值固定为0
-# 			max_val = df[col].max()
-# 			if max_val > min_val:  # 避免除以零
-# 				df[col] = (df[col] - min_val) / (max_val - min_val) * 150
+	# 对 price 和 generation 列进行归一化处理
+	for col in ["generation"]:
+		if col in df.columns:
+			min_val = 0  # 将最小值固定为0
+			max_val = df[col].max()
+			if max_val > min_val:  # 避免除以零
+				df[col] = (df[col] - min_val) / (max_val - min_val) * 150
 	
-# 	# 保存归一化后的数据
-# 	df.to_csv("./data/GS_2024_sorted_scaled.csv", index=False, encoding="utf-8-sig")
+	# 保存归一化后的数据
+	df.to_csv("./data/GS_2024_sorted_scaled.csv", index=False, encoding="utf-8-sig")
+
+def rearrange_data():
+    # 读取数据
+	df = pd.read_csv("./data/GS_2024_scaled_sorted.csv", encoding="utf-8-sig")
+	
+	# 读取df中的generation数据，每24个数据作为CSV文件的一行，生成新的CSV文件
+	generation = df["generation"].values
+	new_df = pd.DataFrame([generation[i:i+24] for i in range(0, len(generation), 24)])
+	# 保存新的CSV文件
+	new_df.to_csv("./data/Generation_scaled.csv", index=False, encoding="utf-8-sig")
+	
+	price = df["price"].values
+	new_df = pd.DataFrame([price[i:i+24] for i in range(0, len(price), 24)])
+	# 保存新的CSV文件
+	new_df.to_csv("./data/Price_scaled.csv", index=False, encoding="utf-8-sig")
 
 if __name__ == "__main__":
 	# preprocess_data()
 	# concat_data()
-	sort_data()
+	# sort_data()
 	# scale_data()
+	rearrange_data()

@@ -4,9 +4,9 @@
 # @file: sample.py
 # @time: 2025/12/25 17:10:36
 # @author: lemonlover
-# @version: 1.0
+# @version: 2.2
 # @eamil: 1920425406@qq.com
-# @desc: Sample the data based on a trained model with DDIM + CFG
+# @desc: Sample the data based on a trained model
 
 import os
 import json
@@ -14,7 +14,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-from model.model_v2_1 import NoisePredictor
+from model.model_v2_2 import NoisePredictor
 
 from evaluate import Evaluator
 from utils import to_json_serializable
@@ -26,22 +26,23 @@ from datetime import datetime, timedelta
 
 
 class Sampler:
-    """支持 DDIM + CFG 的采样器"""
+    """"""
     def __init__(self, arg_dict, model, fp) -> None:
         
         self.arg_dict = arg_dict
         self.model = model
         self.fp = fp
 
-        # DDIM 采样步数（默认 50）
-        self.ddim_steps = arg_dict.get('ddim_steps', 50)
-        # CFG scale（默认 2.5）
-        self.cfg_scale = arg_dict.get('cfg_scale', 2.5)
-
-        # betas / alphas_cumprod
-        self.alphas_cumprod = fp.alphas_cumprod  # (T,)
-        self.sqrt_alphas_cumprod = fp.sqrt_alphas_cumprod
+        # betas parameters of forward process
+        self.betas = fp.betas
         self.sqrt_one_minus_alphas_cumprod = fp.sqrt_one_minus_alphas_cumprod
+        self.sqrt_recip_alphas = fp.sqrt_recip_alphas
+        self.sqrt_alphas_cumprod = fp.sqrt_alphas_cumprod
+        # p[x(t-1)|x(t)]下的方差
+        self.posterior_variance = fp.posterior_variance
+
+        # stepsize
+        self.stepsize = 30
 
 
     @torch.no_grad()
@@ -56,45 +57,30 @@ class Sampler:
         
         # 条件输入
         season = torch.full((B,), self.arg_dict['season'], dtype=torch.long)
-        # CFG null token (id=4)
-        null_season = torch.full((B,), 4, dtype=torch.long)
 
-        # ========= DDIM: 构造子序列时间步 =========
-        # 均匀选取 ddim_steps 个时间步
-        if self.ddim_steps >= T:
-            timesteps = list(reversed(range(T)))
-        else:
-            # 均匀采样 ddim_steps 个时间步（从 T-1 向下到 0）
-            timesteps = [int(T * i / self.ddim_steps) for i in range(self.ddim_steps)]
-            timesteps = timesteps[::-1]  # 从大到小排列
-            # 确保最后一步是 0
-            if timesteps[-1] != 0:
-                timesteps[-1] = 0
-
-        for i, t in enumerate(tqdm(timesteps, desc='DDIM Sampling')):
+        for t in tqdm(reversed(range(T)), desc='Sampling'):
             t_batch = torch.full((B,), t, dtype=torch.long)
+            noise_pred = self.model(xt, t_batch, season)
 
-            # ========= CFG: 同时计算有条件和无条件预测 =========
-            noise_cond = self.model(xt, t_batch, season)
-            noise_uncond = self.model(xt, t_batch, null_season)
-            # 引导组合
-            noise_pred = noise_uncond + self.cfg_scale * (noise_cond - noise_uncond)
-
-            # ========= DDIM 更新 =========
-            sqrt_ac = self.sqrt_alphas_cumprod[t]
-            sqrt_one_minus_ac = self.sqrt_one_minus_alphas_cumprod[t]
-
-            # 预测 x0: x0 = (x_t - sqrt(1-α̅_t) * ε) / sqrt(α̅_t)
-            x0_pred = (xt - sqrt_one_minus_ac * noise_pred) / sqrt_ac
+            # 估计 x0
+            sqrt_alpha_cumprod_t = self.sqrt_alphas_cumprod[t]
+            sqrt_one_minus_alpha_cumprod_t = self.sqrt_one_minus_alphas_cumprod[t]
+            x0_pred = (xt - sqrt_one_minus_alpha_cumprod_t * noise_pred) / sqrt_alpha_cumprod_t
 
             if t > 0:
-                # 找到前一个时间步
-                prev_t = timesteps[i + 1] if i + 1 < len(timesteps) else 0
-                sqrt_ac_prev = self.sqrt_alphas_cumprod[prev_t]
-                sqrt_one_minus_ac_prev = self.sqrt_one_minus_alphas_cumprod[prev_t]
+                # 后验均值 μ_t
+                alpha_t = self.fp.alphas[t]
+                alpha_cumprod_prev = self.fp.alphas_cumprod[t-1]
+                beta_t = self.fp.betas[t]
 
-                # DDIM 确定性更新: x_{prev} = sqrt(α̅_prev) * x0 + sqrt(1-α̅_prev) * ε
-                xt = sqrt_ac_prev * x0_pred + sqrt_one_minus_ac_prev * noise_pred
+                mu_t = (torch.sqrt(alpha_cumprod_prev) * beta_t / (1 - self.fp.alphas_cumprod[t])) * x0_pred \
+                    + (torch.sqrt(alpha_t) * (1 - alpha_cumprod_prev) / (1 - self.fp.alphas_cumprod[t])) * xt
+
+                # 后验方差 σ_t
+                sigma_t = torch.sqrt(self.fp.posterior_variance[t])
+
+                # 采样 x_{t-1}
+                xt = mu_t + sigma_t * torch.randn_like(xt)
             else:
                 xt = x0_pred
 
@@ -306,11 +292,12 @@ def plot_generated_timeseries_all_seasons(
 
     if fake_indices is None:
         min_bf = min(arr.shape[0] for arr in x_fake_list)
-        fake_indices = list(range(min(100, min_bf)))
-
+        # fake_indices = list(range(min(100, min_bf)))
+        fake_indices = list(range(min_bf))
     if x_real_list is not None and real_indices is None:
         min_br = min(arr.shape[0] for arr in x_real_list)
-        real_indices = list(range(min(100, min_br)))
+        # real_indices = list(range(min(100, min_br)))
+        real_indices = list(range(min_bf))
 
     channels = ['Price', 'Generation']
 
@@ -347,6 +334,9 @@ def plot_generated_timeseries_all_seasons(
             axes[c*4 + season].set_ylabel(channels[c])
             axes[c*4 + season].grid(True)
             axes[c*4 + season].legend()
+            
+    # 输出绘制了多少数据
+    print(f"Season {season}: {len(fake_indices)} fake data, {len(real_indices)} real data")
     axes[1].set_xlabel('Time step')
 
     plt.tight_layout()
@@ -376,8 +366,8 @@ def main(arg_dict):
         x_fake1 = denormalize_timeseries(x_fake, dataset.stats)
         
         # 电价信息处理
-        # 小于40的电价设为40，避免过低的电价导致评估指标失真
-        x_fake1[:, 0] = np.clip(x_fake1[:, 0], a_min=40, a_max=None)  
+        # 小于40的电价设为40, 大于650的电价设为650，避免过低的电价导致评估指标失真
+        x_fake1[:, 0] = np.clip(x_fake1[:, 0], a_min=40, a_max=650)  
         
         # 由模型得到的数据与真实数据进行比较
         # 评估
@@ -409,7 +399,7 @@ def main(arg_dict):
             arg_dict['season'] = season
             x_fake = sampler.sample()
             x_fake1 = denormalize_timeseries(x_fake, dataset.stats)
-            x_fake1[:, 0] = np.clip(x_fake1[:, 0], a_min=40, a_max=None)  
+            x_fake1[:, 0] = np.clip(x_fake1[:, 0], a_min=40, a_max=650)  
             x_fake_seasons.append(x_fake1)
 
             # 由模型得到的数据与真实数据进行比较
@@ -431,7 +421,6 @@ def main(arg_dict):
             
             x_real = get_timeseries_by_condition(dataset, season=season)
             x_real_seasons.append(x_real)
-            
 
         plot_generated_timeseries_all_seasons(x_fake_seasons, x_real_seasons, results_root=results_root)
 
@@ -441,11 +430,9 @@ if __name__ == '__main__':
 
     arg_dict = {
         # 当前采用 linear 编码器，使用的训练数据是按照每天的顺序连接起来的
-        "checkpoints": './logs/[06-17]19.39.59 cfg=0.05/model_4999.tar', 
-        "num": 1460,  # the number of data you want to generate
-        "T": 200,
-        "ddim_steps": 50,  # DDIM 采样步数（原200步→50步，速度提升4倍）
-        "cfg_scale": 1.5,  # CFG 引导强度（1.5~2.5 之间）
+        "checkpoints": './logs/[06-18]15.38.20 smaller model cross-variable encoder/model_4999.tar', 
+        "num": 100,  # the number of data you want to generate
+        "T": 300,
         "single_season": False,  # False: 同时生成4个季节的数据；True: 只生成一个季节的数据
         "season": 0,
     }

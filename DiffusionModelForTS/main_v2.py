@@ -17,10 +17,24 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from model.model_v2 import NoisePredictor
+from model.model_v2_2 import NoisePredictor
 from forward import ForwardProcess
 from dataset import MultiVarTimeSeriesDataset
 from utils import bulid_log_dir
+
+
+def pearson_corr(x, y):
+    """
+    计算 x, y 沿最后一维的 Pearson 相关系数
+    x, y: (B, L)
+    return: (B,) 每个样本的相关系数
+    """
+    x_mean = x.mean(dim=-1, keepdim=True)
+    y_mean = y.mean(dim=-1, keepdim=True)
+    x_c = x - x_mean
+    y_c = y - y_mean
+    denom = torch.sqrt((x_c ** 2).sum(dim=-1) * (y_c ** 2).sum(dim=-1) + 1e-8)
+    return (x_c * y_c).sum(dim=-1) / denom
 
 
 class Trainer:
@@ -66,28 +80,59 @@ class Trainer:
             # forward process 前向加噪
             noisy_X, noises = self.fp(X, t)
 
-            # backward process 使用模型预测噪声！（重点）
+            # backward process 使用模型预测噪声
             noise_pred = self.model(noisy_X, t, season)
 
-            loss = self.loss_func(noises, noise_pred)
+            # ---- loss_noise: 噪声预测 MSE ----
+            loss_noise = self.loss_func(noises, noise_pred)
+
+            # ---- loss_corr: 联合分布约束 ----
+            # 从噪声预测恢复 X_0_hat
+            sqrt_alpha_bar_t = self.fp.get_index_from_list(
+                self.fp.sqrt_alphas_cumprod, t, noisy_X.shape
+            )
+            sqrt_one_minus_alpha_bar_t = self.fp.get_index_from_list(
+                self.fp.sqrt_one_minus_alphas_cumprod, t, noisy_X.shape
+            )
+            X_0_hat = (noisy_X - sqrt_one_minus_alpha_bar_t * noise_pred) / sqrt_alpha_bar_t
+
+            # 真实数据的 Price-Generation 相关性
+            corr_real = pearson_corr(X[:, 0, :], X[:, 1, :]).mean()
+            # 模型预测的 Price-Generation 相关性
+            corr_fake = pearson_corr(X_0_hat[:, 0, :], X_0_hat[:, 1, :]).mean()
+            loss_corr = (corr_real - corr_fake) ** 2
+
+            # ---- 总损失 ----
+            loss = loss_noise + self.hyper_params['corr_weight'] * loss_corr
+
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
 
-            # 记录损失
             loss_list.append(loss.detach().cpu().item())
         
-        return float(sum(loss_list) / len(loss_list))
+            loss_noise_val = loss_noise.detach().cpu().item()
+            loss_corr_val = loss_corr.detach().cpu().item()
+            corr_real_val = corr_real.detach().cpu().item()
+            corr_fake_val = corr_fake.detach().cpu().item()
+
+        return float(sum(loss_list) / len(loss_list)), loss_noise_val, loss_corr_val, corr_real_val, corr_fake_val
+
+
 
     def train(self):
         """Train the model."""
         for epoch in range(self.hyper_params['num_epochs']):
             # train for epoch
-            loss = self._train_for_epoch(epoch)
+            loss, loss_noise_val, loss_corr_val, corr_real_val, corr_fake_val = self._train_for_epoch(epoch)
             if (epoch+1) % 500 == 0:
                 self._save_model(epoch, min=True)
             # 记录日志
             self.writer.add_scalar(tag='loss', scalar_value=loss, global_step=epoch)
+            self.writer.add_scalar(tag='loss_noise', scalar_value=loss_noise_val, global_step=epoch)
+            self.writer.add_scalar(tag='loss_corr', scalar_value=loss_corr_val, global_step=epoch)
+            self.writer.add_scalar(tag='corr_real', scalar_value=corr_real_val, global_step=epoch)
+            self.writer.add_scalar(tag='corr_fake', scalar_value=corr_fake_val, global_step=epoch)
 
 
     def _save_model(self, epoch, min=False):
@@ -108,6 +153,7 @@ hyper_params = {
     "lr": 2e-5,
     "num_epochs": 5000,
     "weight_decay": 1e-4,
+    "corr_weight": 0.2,
     "log_dir": bulid_log_dir(dir='./logs')
 }
 
